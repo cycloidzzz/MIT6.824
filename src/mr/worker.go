@@ -1,10 +1,15 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
-
+import (
+	"encoding/json"
+	"fmt"
+	"hash/fnv"
+	"io/ioutil"
+	"log"
+	"net/rpc"
+	"os"
+	"sync"
+)
 
 //
 // Map functions return a slice of KeyValue.
@@ -24,7 +29,6 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
 //
 // main/mrworker.go calls this function.
 //
@@ -32,10 +36,77 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
+	var wg sync.WaitGroup
+	go func() {
+		wg.Add(1)
+		defer wg.Done()
+		for true {
+			reply := CallMapper()
+			if reply.ShouldExit {
+				break
+			}
+			filename := reply.MapperTaskName
+			taskId := reply.MapperTaskId
+			numReduce := reply.NumReduceTask
 
+			file, err := os.Open(filename)
+			if err != nil {
+				log.Fatalf("Cannot open %v", filename)
+			}
+
+			content, err := ioutil.ReadAll(file)
+			if err != nil {
+				log.Fatalf("Cannot read %v", filename)
+			}
+			file.Close()
+
+			kvArray := mapf(filename, string(content))
+
+			outNames := make([]string, numReduce)
+			outFiles := make([]*os.File, numReduce)
+			reducerBuffers := make([][]KeyValue, numReduce)
+			for i := 0; i < numReduce; i++ {
+				outNames[i] = fmt.Sprint("mr-", taskId, "-", i)
+				ofile, err := os.Create(outNames[i])
+				if err != nil {
+					log.Fatalf("Cannot create file %v", outNames[i])
+				}
+				outFiles[i] = ofile
+			}
+
+			// Strat our mapping job.
+			for _, kv := range kvArray {
+				reduceIndex := ihash(kv.Key) % numReduce
+				reducerBuffers[reduceIndex] = append(reducerBuffers[reduceIndex], kv)
+			}
+
+			// Write to the corresponding intermediate files.
+			for i := 0; i < numReduce; i++ {
+				encoder := json.NewEncoder(outFiles[i])
+				for _, kv := range reducerBuffers[i] {
+					err := encoder.Encode(&kv)
+					if err != nil {
+						log.Fatalf("Cannot encode %v", kv)
+					}
+				}
+			}
+
+			// Close the open files.
+			for i := 0; i < numReduce; i++ {
+				outFiles[i].Close()
+			}
+		}
+	}()
+
+	go func() {
+		wg.Add(1)
+		defer wg.Done()
+
+	}()
+
+	wg.Wait()
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
-
 }
 
 //
@@ -65,6 +136,19 @@ func CallExample() {
 	} else {
 		fmt.Printf("call failed!\n")
 	}
+}
+
+func CallMapper() MapperTaskResponse {
+	mapperRequest := MapperTaskRequest{}
+
+	mapperReply := MapperTaskResponse{}
+
+	ok := call("Coordinator.Mapper", &mapperRequest, &mapperReply)
+	if !ok {
+		log.Fatal("Call to Mapper fail!")
+	}
+
+	return mapperReply
 }
 
 //
