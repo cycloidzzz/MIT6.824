@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	"sort"
 	"sync"
 )
 
@@ -18,6 +19,14 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 //
 // use ihash(key) % NReduce to choose the reduce
@@ -37,11 +46,14 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// Your worker implementation here.
 	var wg sync.WaitGroup
+
+	wg.Add(1)
 	go func() {
-		wg.Add(1)
 		defer wg.Done()
+
+		lastMapperId := -1
 		for true {
-			reply := CallMapper()
+			reply := CallMapper(lastMapperId)
 			if reply.ShouldExit {
 				break
 			}
@@ -95,13 +107,85 @@ func Worker(mapf func(string, string) []KeyValue,
 			for i := 0; i < numReduce; i++ {
 				outFiles[i].Close()
 			}
+
+			lastMapperId = taskId
 		}
+		// fmt.Println("Mapper Worker is now exiting.")
 	}()
 
+	wg.Add(1)
 	go func() {
-		wg.Add(1)
 		defer wg.Done()
 
+		lastTaskId := -1
+
+		for true {
+			reply := CallReducer(lastTaskId)
+
+			if reply.ShouldExit {
+				break
+			}
+
+			// Start reducer task
+			reducerId := reply.ReducerTaskId
+			numMapTask := reply.NumMapperTask
+
+			var reducerBuffer []KeyValue
+
+			for i := 0; i < numMapTask; i++ {
+				ifilename := fmt.Sprint("mr-", i, "-", reducerId)
+				ifile, err := os.Open(ifilename)
+				if err != nil {
+					log.Fatalf("Reducer: cannot open file %v", ifilename)
+				}
+
+				decoder := json.NewDecoder(ifile)
+				for {
+					var kv KeyValue
+					if err := decoder.Decode(&kv); err != nil {
+						break
+					}
+					reducerBuffer = append(reducerBuffer, kv)
+				}
+				ifile.Close()
+
+				// remove intermediate file w.r.t to this worker
+				err = os.Remove(ifilename)
+				if err != nil {
+					log.Fatalf("Reducer Worker: cannot remove file %v", ifilename)
+				}
+			}
+
+			sort.Sort(ByKey(reducerBuffer))
+
+			ofilename := fmt.Sprint("mr-out-", reducerId)
+			ofile, err := os.Create(ofilename)
+			if err != nil {
+				log.Fatalf("Cannot create file %v", ofilename)
+			}
+
+			startIndex := 0
+			for startIndex < len(reducerBuffer) {
+				endIndex := startIndex + 1
+				for endIndex < len(reducerBuffer) &&
+					reducerBuffer[startIndex].Key == reducerBuffer[endIndex].Key {
+					endIndex += 1
+				}
+
+				values := []string{}
+				for i := startIndex; i < endIndex; i++ {
+					values = append(values, reducerBuffer[i].Value)
+				}
+				output := reducef(reducerBuffer[startIndex].Key, values)
+				fmt.Fprintf(ofile, "%v %v\n", reducerBuffer[startIndex].Key, output)
+
+				startIndex = endIndex
+			}
+			ofile.Close()
+
+			lastTaskId = reducerId
+		}
+		// fmt.Println("Reducer Worker is now exiting.")
 	}()
 
 	wg.Wait()
@@ -138,8 +222,9 @@ func CallExample() {
 	}
 }
 
-func CallMapper() MapperTaskResponse {
+func CallMapper(lastMapperTaskId int) MapperTaskResponse {
 	mapperRequest := MapperTaskRequest{}
+	mapperRequest.CompletedMapperTaskId = lastMapperTaskId
 
 	mapperReply := MapperTaskResponse{}
 
@@ -149,6 +234,21 @@ func CallMapper() MapperTaskResponse {
 	}
 
 	return mapperReply
+}
+
+func CallReducer(lastReducerTaskId int) ReducerTaskResponse {
+	reducerRequest := ReducerTaskRequest{}
+	reducerReply := ReducerTaskResponse{}
+
+	reducerRequest.CompletedReducerTaskId = lastReducerTaskId
+
+	ok := call("Coordinator.Reducer", &reducerRequest, &reducerReply)
+
+	if !ok {
+		log.Fatal("Call to Reducer fail!")
+	}
+
+	return reducerReply
 }
 
 //

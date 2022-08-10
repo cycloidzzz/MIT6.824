@@ -27,6 +27,7 @@ type ExampleReply struct {
 // Add your RPC definitions here.
 // Mapper request
 type MapperTaskRequest struct {
+	CompletedMapperTaskId int
 }
 
 // Mapper response
@@ -35,6 +36,16 @@ type MapperTaskResponse struct {
 	MapperTaskId   int
 	NumReduceTask  int
 	ShouldExit     bool
+}
+
+type ReducerTaskRequest struct {
+	CompletedReducerTaskId int
+}
+
+type ReducerTaskResponse struct {
+	ReducerTaskId int
+	NumMapperTask int
+	ShouldExit    bool
 }
 
 // Cook up a unique-ish UNIX-domain socket name
