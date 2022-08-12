@@ -47,14 +47,18 @@ func Worker(mapf func(string, string) []KeyValue,
 	// Your worker implementation here.
 	var wg sync.WaitGroup
 
-	wg.Add(1)
+	wg.Add(2)
 	go func() {
 		defer wg.Done()
 
 		lastMapperId := -1
 		for true {
-			reply := CallMapper(lastMapperId)
-			if reply.ShouldExit {
+			request := MapperTaskRequest{}
+			request.CompletedMapperTaskId = lastMapperId
+			reply := MapperTaskResponse{}
+
+			ok := call("Coordinator.Mapper", &request, &reply)
+			if !ok || reply.ShouldExit {
 				break
 			}
 			filename := reply.MapperTaskName
@@ -75,15 +79,19 @@ func Worker(mapf func(string, string) []KeyValue,
 			kvArray := mapf(filename, string(content))
 
 			outNames := make([]string, numReduce)
+			tempNames := make([]string, numReduce)
 			outFiles := make([]*os.File, numReduce)
 			reducerBuffers := make([][]KeyValue, numReduce)
 			for i := 0; i < numReduce; i++ {
 				outNames[i] = fmt.Sprint("mr-", taskId, "-", i)
-				ofile, err := os.Create(outNames[i])
+				//ofile, err := os.Create(outNames[i])
+				ofile, err := ioutil.TempFile(".", fmt.Sprint(outNames[i], ".*"))
 				if err != nil {
 					log.Fatalf("Cannot create file %v", outNames[i])
 				}
 				outFiles[i] = ofile
+				//fmt.Println("Tempfile name: ", ofile.Name())
+				tempNames[i] = ofile.Name()
 			}
 
 			// Strat our mapping job.
@@ -108,21 +116,34 @@ func Worker(mapf func(string, string) []KeyValue,
 				outFiles[i].Close()
 			}
 
+			// Rename the temp file
+			for i := 0; i < numReduce; i++ {
+				err := os.Rename(tempNames[i], outNames[i])
+				if err != nil {
+					log.Fatalf("Cannot rename temp file %v to %v", tempNames[i], outNames[i])
+				}
+			}
+			//fmt.Print("Map Task is done: ", taskId)
+
 			lastMapperId = taskId
 		}
-		// fmt.Println("Mapper Worker is now exiting.")
+		//fmt.Println("Mapper Worker is now exiting.")
 	}()
 
-	wg.Add(1)
 	go func() {
 		defer wg.Done()
 
 		lastTaskId := -1
 
 		for true {
-			reply := CallReducer(lastTaskId)
+			request := ReducerTaskRequest{}
+			reply := ReducerTaskResponse{}
 
-			if reply.ShouldExit {
+			request.CompletedReducerTaskId = lastTaskId
+
+			ok := call("Coordinator.Reducer", &request, &reply)
+
+			if !ok || reply.ShouldExit {
 				break
 			}
 
@@ -148,21 +169,17 @@ func Worker(mapf func(string, string) []KeyValue,
 					reducerBuffer = append(reducerBuffer, kv)
 				}
 				ifile.Close()
-
-				// remove intermediate file w.r.t to this worker
-				err = os.Remove(ifilename)
-				if err != nil {
-					log.Fatalf("Reducer Worker: cannot remove file %v", ifilename)
-				}
 			}
 
 			sort.Sort(ByKey(reducerBuffer))
 
 			ofilename := fmt.Sprint("mr-out-", reducerId)
-			ofile, err := os.Create(ofilename)
+			//ofile, err := os.Create(ofilename)
+			ofile, err := ioutil.TempFile(".", fmt.Sprint(ofilename, "*"))
 			if err != nil {
 				log.Fatalf("Cannot create file %v", ofilename)
 			}
+			tempName := ofile.Name()
 
 			startIndex := 0
 			for startIndex < len(reducerBuffer) {
@@ -182,10 +199,20 @@ func Worker(mapf func(string, string) []KeyValue,
 				startIndex = endIndex
 			}
 			ofile.Close()
+			os.Rename(tempName, ofilename)
+
+			// remove intermediate file w.r.t to this worker
+			for i := 0; i < numMapTask; i++ {
+				ifilename := fmt.Sprint("mr-", i, "-", reducerId)
+				err = os.Remove(ifilename)
+				if err != nil {
+					log.Fatalf("Reducer Worker: cannot remove file %v", ifilename)
+				}
+			}
 
 			lastTaskId = reducerId
 		}
-		// fmt.Println("Reducer Worker is now exiting.")
+		//fmt.Println("Reducer Worker is now exiting.")
 	}()
 
 	wg.Wait()
@@ -223,32 +250,31 @@ func CallExample() {
 }
 
 func CallMapper(lastMapperTaskId int) MapperTaskResponse {
-	mapperRequest := MapperTaskRequest{}
-	mapperRequest.CompletedMapperTaskId = lastMapperTaskId
+	request := MapperTaskRequest{}
+	request.CompletedMapperTaskId = lastMapperTaskId
+	reply := MapperTaskResponse{}
 
-	mapperReply := MapperTaskResponse{}
-
-	ok := call("Coordinator.Mapper", &mapperRequest, &mapperReply)
+	ok := call("Coordinator.Mapper", &request, &reply)
 	if !ok {
 		log.Fatal("Call to Mapper fail!")
 	}
 
-	return mapperReply
+	return reply
 }
 
 func CallReducer(lastReducerTaskId int) ReducerTaskResponse {
-	reducerRequest := ReducerTaskRequest{}
-	reducerReply := ReducerTaskResponse{}
+	request := ReducerTaskRequest{}
+	reply := ReducerTaskResponse{}
 
-	reducerRequest.CompletedReducerTaskId = lastReducerTaskId
+	request.CompletedReducerTaskId = lastReducerTaskId
 
-	ok := call("Coordinator.Reducer", &reducerRequest, &reducerReply)
+	ok := call("Coordinator.Reducer", &request, &reply)
 
 	if !ok {
 		log.Fatal("Call to Reducer fail!")
 	}
 
-	return reducerReply
+	return reply
 }
 
 //
