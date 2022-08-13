@@ -47,7 +47,7 @@ func Worker(mapf func(string, string) []KeyValue,
 	// Your worker implementation here.
 	var wg sync.WaitGroup
 
-	wg.Add(2)
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
 
@@ -130,6 +130,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		//fmt.Println("Mapper Worker is now exiting.")
 	}()
 
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
 
